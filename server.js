@@ -50,40 +50,42 @@ const otpSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Otp = mongoose.model('Otp', otpSchema);
 
-// ---------- Mail transporter ----------
+// ---------- Mail (Brevo HTTP API) ----------
 let mailReady = false;
 let lastMailError = null;
 
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const RESEND_FROM = process.env.RESEND_FROM || 'onboarding@resend.dev';
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL;
+const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'OTP Login';
 
-if (!RESEND_API_KEY) {
-  console.error('WARNING: RESEND_API_KEY is not set. Emails will not be sent.');
-  lastMailError = 'RESEND_API_KEY not set';
+if (!BREVO_API_KEY || !BREVO_FROM_EMAIL) {
+  console.error('WARNING: BREVO_API_KEY or BREVO_FROM_EMAIL is not set. Emails will not be sent.');
+  lastMailError = 'BREVO_API_KEY or BREVO_FROM_EMAIL not set';
 } else {
   mailReady = true;
-  console.log('Resend email API configured');
+  console.log('Brevo email API configured');
 }
 
-// Send email via Resend HTTP API (works over HTTPS, avoids SMTP port blocks)
+// Send OTP email via Brevo HTTP API (HTTPS-based, avoids SMTP port blocks)
 async function sendOtpEmail(toEmail, otp) {
-  const response = await fetch('https://api.resend.com/emails', {
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${RESEND_API_KEY}`,
-      'Content-Type': 'application/json'
+      'api-key': BREVO_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
     },
     body: JSON.stringify({
-      from: RESEND_FROM,
-      to: [toEmail],
+      sender: { name: BREVO_FROM_NAME, email: BREVO_FROM_EMAIL },
+      to: [{ email: toEmail }],
       subject: 'Your OTP Code',
-      html: `<p>Your OTP code is <b>${otp}</b>. It is valid for 5 minutes.</p>`
+      htmlContent: `<p>Your OTP code is <b>${otp}</b>. It is valid for 5 minutes.</p>`
     })
   });
 
   if (!response.ok) {
     const errBody = await response.text();
-    throw new Error(`Resend API error (${response.status}): ${errBody}`);
+    throw new Error(`Brevo API error (${response.status}): ${errBody}`);
   }
 
   return response.json();
@@ -162,7 +164,7 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
       return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
     }
 
-    if (!RESEND_API_KEY) {
+    if (!mailReady) {
       return res.status(503).json({ error: 'Email service is not configured on the server.' });
     }
 
