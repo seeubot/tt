@@ -62,6 +62,7 @@
     font-size: 14px;
     text-align: center;
     display: none;
+    word-break: break-word;
   }
   .msg.error { background: #fdecea; color: #c0392b; display: block; }
   .msg.success { background: #eafaf1; color: #27ae60; display: block; }
@@ -135,6 +136,35 @@
     msg.textContent = '';
   }
 
+  // Helper: fetch with JSON parsing + clear error surfacing
+  async function apiPost(url, body) {
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } catch (err) {
+      // This only happens if the request never reached the server
+      // (DNS failure, CORS block, offline, etc.)
+      throw new Error('Could not reach the server (' + err.message + ')');
+    }
+
+    let data;
+    try {
+      data = await res.json();
+    } catch (err) {
+      throw new Error('Server returned an invalid response (status ' + res.status + ')');
+    }
+
+    if (!res.ok) {
+      throw new Error(data.error || ('Request failed with status ' + res.status));
+    }
+
+    return data;
+  }
+
   phoneInput.addEventListener('input', () => {
     phoneInput.value = phoneInput.value.replace(/\D/g, '').slice(0, 10);
   });
@@ -157,19 +187,7 @@
     continueBtn.textContent = 'Checking...';
 
     try {
-      const res = await fetch(`${API_BASE}/api/check-phone`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone })
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        showMsg(data.error || 'Something went wrong.', 'error');
-        continueBtn.disabled = false;
-        continueBtn.textContent = 'Continue';
-        return;
-      }
+      const data = await apiPost(`${API_BASE}/api/check-phone`, { phone });
 
       emailRequired = data.emailRequired;
 
@@ -186,7 +204,7 @@
       await sendOtp(phone);
 
     } catch (err) {
-      showMsg('Network error. Please try again.', 'error');
+      showMsg(err.message, 'error');
       continueBtn.disabled = false;
       continueBtn.textContent = 'Continue';
     }
@@ -210,19 +228,7 @@
     continueBtn.textContent = 'Sending OTP...';
 
     try {
-      const res = await fetch(`${API_BASE}/api/send-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, email })
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        showMsg(data.error || 'Failed to send OTP.', 'error');
-        continueBtn.disabled = false;
-        continueBtn.textContent = emailRequired ? 'Send OTP' : 'Continue';
-        return;
-      }
+      const data = await apiPost(`${API_BASE}/api/send-otp`, { phone, email });
 
       currentPhone = phone;
       showMsg(data.message, 'success');
@@ -230,7 +236,7 @@
       stepOtp.classList.remove('hidden');
 
     } catch (err) {
-      showMsg('Network error. Please try again.', 'error');
+      showMsg(err.message, 'error');
       continueBtn.disabled = false;
       continueBtn.textContent = emailRequired ? 'Send OTP' : 'Continue';
     }
@@ -250,19 +256,7 @@
     verifyBtn.textContent = 'Verifying...';
 
     try {
-      const res = await fetch(`${API_BASE}/api/verify-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: currentPhone, otp })
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        showMsg(data.error || 'Verification failed.', 'error');
-        verifyBtn.disabled = false;
-        verifyBtn.textContent = 'Verify & Login';
-        return;
-      }
+      const data = await apiPost(`${API_BASE}/api/verify-otp`, { phone: currentPhone, otp });
 
       showMsg('Login successful! Welcome.', 'success');
       verifyBtn.disabled = true;
@@ -271,7 +265,7 @@
       // window.location.href = '/dashboard.html';
 
     } catch (err) {
-      showMsg('Network error. Please try again.', 'error');
+      showMsg(err.message, 'error');
       verifyBtn.disabled = false;
       verifyBtn.textContent = 'Verify & Login';
     }
