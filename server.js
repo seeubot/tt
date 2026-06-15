@@ -11,7 +11,12 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- MongoDB ----------
-mongoose.connect('mongodb+srv://movie:movie@movie.tylkv.mongodb.net/otp-app?appName=movie')
+if (!process.env.MONGO_URI) {
+  console.error('FATAL: MONGO_URI is not set in environment variables.');
+  process.exit(1);
+}
+
+mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => {
     console.error('MongoDB connection error:', err.message);
@@ -37,9 +42,17 @@ const User = mongoose.model('User', userSchema);
 const Otp = mongoose.model('Otp', otpSchema);
 
 // ---------- Brevo Email Configuration ----------
-const BREVO_API_KEY = 'xsmtpsib-e2c10a0415fb71988ca4546b5281d9b95799574c53bfda38e73188016e9f489a-fevW0ZZxJ3aGFYmy';
-const BREVO_FROM_EMAIL = 'siddhikreddy440@gmail.com';
-const BREVO_FROM_NAME = 'OTP Login App';
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL;
+const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'OTP Login App';
+
+let mailReady = false;
+if (!BREVO_API_KEY || !BREVO_FROM_EMAIL) {
+  console.error('WARNING: BREVO_API_KEY or BREVO_FROM_EMAIL is not set. Emails will not be sent.');
+} else {
+  mailReady = true;
+  console.log('Brevo email API configured');
+}
 
 // Send OTP email via Brevo
 async function sendOtpEmail(toEmail, otp) {
@@ -137,7 +150,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    mail: 'configured'
+    mail: mailReady ? 'ready' : 'not_ready'
   });
 });
 
@@ -169,6 +182,10 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
 
     if (!phone || !isValidIndianPhone(phone)) {
       return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
+    }
+
+    if (!mailReady) {
+      return res.status(503).json({ error: 'Email service is not configured on the server.' });
     }
 
     let user = await User.findOne({ phone });
