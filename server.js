@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
@@ -54,32 +53,40 @@ const Otp = mongoose.model('Otp', otpSchema);
 // ---------- Mail transporter ----------
 let mailReady = false;
 let lastMailError = null;
-let transporter = null;
 
-if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-  console.error('WARNING: SMTP_USER or SMTP_PASS is not set. Emails will not be sent.');
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || 'onboarding@resend.dev';
+
+if (!RESEND_API_KEY) {
+  console.error('WARNING: RESEND_API_KEY is not set. Emails will not be sent.');
+  lastMailError = 'RESEND_API_KEY not set';
 } else {
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: Number(process.env.SMTP_PORT) || 465,
-    secure: process.env.SMTP_SECURE !== 'false', // true for 465, false for 587
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS
-    }
+  mailReady = true;
+  console.log('Resend email API configured');
+}
+
+// Send email via Resend HTTP API (works over HTTPS, avoids SMTP port blocks)
+async function sendOtpEmail(toEmail, otp) {
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM,
+      to: [toEmail],
+      subject: 'Your OTP Code',
+      html: `<p>Your OTP code is <b>${otp}</b>. It is valid for 5 minutes.</p>`
+    })
   });
 
-  transporter.verify((err) => {
-    if (err) {
-      console.error('SMTP verification failed:', err.message, '| code:', err.code, '| response:', err.response);
-      mailReady = false;
-      lastMailError = `${err.code || ''} ${err.message}`.trim();
-    } else {
-      console.log('SMTP transporter ready');
-      mailReady = true;
-      lastMailError = null;
-    }
-  });
+  if (!response.ok) {
+    const errBody = await response.text();
+    throw new Error(`Resend API error (${response.status}): ${errBody}`);
+  }
+
+  return response.json();
 }
 
 // ---------- Helpers ----------
@@ -155,7 +162,7 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
       return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
     }
 
-    if (!transporter) {
+    if (!RESEND_API_KEY) {
       return res.status(503).json({ error: 'Email service is not configured on the server.' });
     }
 
@@ -182,12 +189,7 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
 
     await Otp.create({ phone, email: targetEmail, otpHash, expiresAt });
 
-    await transporter.sendMail({
-      from: `"OTP Login" <${process.env.SMTP_USER}>`,
-      to: targetEmail,
-      subject: 'Your OTP Code',
-      html: `<p>Your OTP code is <b>${otp}</b>. It is valid for 5 minutes.</p>`
-    });
+    await sendOtpEmail(targetEmail, otp);
 
     // Mask email for privacy in response
     const maskedEmail = targetEmail.replace(/^(.{2}).+(@.+)$/, '$1***$2');
@@ -195,7 +197,7 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
     res.json({ success: true, message: `OTP sent to ${maskedEmail}` });
   } catch (err) {
     console.error('send-otp error:', err);
-    res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
+    res.status(500).json({ error: 'Failed to send OTP: ' + err.message });
   }
 });
 
