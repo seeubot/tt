@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Login with OTP</title>
+<style>
+  * { box-sizing: border-box; font-family: 'Segoe UI', Arial, sans-serif; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+  }
+  .card {
+    background: #fff;
+    padding: 32px;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    width: 100%;
+    max-width: 380px;
+  }
+  h2 { margin-top: 0; text-align: center; color: #333; }
+  label { display: block; margin: 14px 0 6px; font-size: 14px; color: #555; }
+  .phone-row { display: flex; gap: 8px; }
+  .phone-row span {
+    display: flex; align-items: center; justify-content: center;
+    background: #f0f0f0; border-radius: 8px; padding: 0 12px;
+    font-weight: 600; color: #555;
+  }
+  input {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-size: 15px;
+    outline: none;
+    transition: border 0.2s;
+  }
+  input:focus { border-color: #667eea; }
+  button {
+    width: 100%;
+    margin-top: 20px;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: #667eea;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover { background: #5a6fd8; }
+  button:disabled { background: #aaa; cursor: not-allowed; }
+  .msg {
+    margin-top: 14px;
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 14px;
+    text-align: center;
+    display: none;
+  }
+  .msg.error { background: #fdecea; color: #c0392b; display: block; }
+  .msg.success { background: #eafaf1; color: #27ae60; display: block; }
+  .hidden { display: none; }
+  .resend {
+    margin-top: 10px;
+    text-align: center;
+    font-size: 13px;
+    color: #667eea;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h2>Login</h2>
+
+  <!-- Step 1: Phone (+ Email if needed) -->
+  <div id="step-phone">
+    <label for="phone">Phone Number</label>
+    <div class="phone-row">
+      <span>+91</span>
+      <input type="tel" id="phone" maxlength="10" placeholder="10-digit number" />
+    </div>
+
+    <div id="email-field" class="hidden">
+      <label for="email">Email Address</label>
+      <input type="email" id="email" placeholder="you@example.com" />
+    </div>
+
+    <button id="continue-btn">Continue</button>
+  </div>
+
+  <!-- Step 2: OTP -->
+  <div id="step-otp" class="hidden">
+    <label for="otp">Enter OTP</label>
+    <input type="text" id="otp" maxlength="6" placeholder="6-digit OTP" />
+    <button id="verify-btn">Verify & Login</button>
+    <div class="resend" id="resend-link">Resend OTP</div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+</div>
+
+<script>
+  const API_BASE = ''; // same origin; change to backend URL if hosted separately
+
+  const phoneInput = document.getElementById('phone');
+  const emailField = document.getElementById('email-field');
+  const emailInput = document.getElementById('email');
+  const continueBtn = document.getElementById('continue-btn');
+  const stepPhone = document.getElementById('step-phone');
+  const stepOtp = document.getElementById('step-otp');
+  const otpInput = document.getElementById('otp');
+  const verifyBtn = document.getElementById('verify-btn');
+  const resendLink = document.getElementById('resend-link');
+  const msg = document.getElementById('msg');
+
+  let emailRequired = false;
+  let currentPhone = '';
+
+  function showMsg(text, type) {
+    msg.textContent = text;
+    msg.className = 'msg ' + type;
+  }
+
+  function clearMsg() {
+    msg.className = 'msg';
+    msg.textContent = '';
+  }
+
+  phoneInput.addEventListener('input', () => {
+    phoneInput.value = phoneInput.value.replace(/\D/g, '').slice(0, 10);
+  });
+
+  otpInput.addEventListener('input', () => {
+    otpInput.value = otpInput.value.replace(/\D/g, '').slice(0, 6);
+  });
+
+  // Step 1a: Check phone -> determine if email is needed
+  continueBtn.addEventListener('click', async () => {
+    clearMsg();
+    const phone = phoneInput.value.trim();
+
+    if (phone.length !== 10) {
+      showMsg('Enter a valid 10-digit phone number.', 'error');
+      return;
+    }
+
+    continueBtn.disabled = true;
+    continueBtn.textContent = 'Checking...';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/check-phone`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showMsg(data.error || 'Something went wrong.', 'error');
+        continueBtn.disabled = false;
+        continueBtn.textContent = 'Continue';
+        return;
+      }
+
+      emailRequired = data.emailRequired;
+
+      if (emailRequired && emailField.classList.contains('hidden')) {
+        // Show email field, let user fill it, then send OTP on next click
+        emailField.classList.remove('hidden');
+        continueBtn.textContent = 'Send OTP';
+        continueBtn.disabled = false;
+        showMsg(data.message, 'success');
+        return;
+      }
+
+      // Either email already exists, or email field already shown - send OTP
+      await sendOtp(phone);
+
+    } catch (err) {
+      showMsg('Network error. Please try again.', 'error');
+      continueBtn.disabled = false;
+      continueBtn.textContent = 'Continue';
+    }
+  });
+
+  async function sendOtp(phone) {
+    clearMsg();
+
+    let email = '';
+    if (emailRequired) {
+      email = emailInput.value.trim();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        showMsg('Enter a valid email address.', 'error');
+        continueBtn.disabled = false;
+        continueBtn.textContent = 'Send OTP';
+        return;
+      }
+    }
+
+    continueBtn.disabled = true;
+    continueBtn.textContent = 'Sending OTP...';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/send-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, email })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showMsg(data.error || 'Failed to send OTP.', 'error');
+        continueBtn.disabled = false;
+        continueBtn.textContent = emailRequired ? 'Send OTP' : 'Continue';
+        return;
+      }
+
+      currentPhone = phone;
+      showMsg(data.message, 'success');
+      stepPhone.classList.add('hidden');
+      stepOtp.classList.remove('hidden');
+
+    } catch (err) {
+      showMsg('Network error. Please try again.', 'error');
+      continueBtn.disabled = false;
+      continueBtn.textContent = emailRequired ? 'Send OTP' : 'Continue';
+    }
+  }
+
+  // Step 2: Verify OTP
+  verifyBtn.addEventListener('click', async () => {
+    clearMsg();
+    const otp = otpInput.value.trim();
+
+    if (otp.length !== 6) {
+      showMsg('Enter the 6-digit OTP.', 'error');
+      return;
+    }
+
+    verifyBtn.disabled = true;
+    verifyBtn.textContent = 'Verifying...';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/verify-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: currentPhone, otp })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showMsg(data.error || 'Verification failed.', 'error');
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verify & Login';
+        return;
+      }
+
+      showMsg('Login successful! Welcome.', 'success');
+      verifyBtn.disabled = true;
+
+      // Redirect or update UI as needed
+      // window.location.href = '/dashboard.html';
+
+    } catch (err) {
+      showMsg('Network error. Please try again.', 'error');
+      verifyBtn.disabled = false;
+      verifyBtn.textContent = 'Verify & Login';
+    }
+  });
+
+  // Resend OTP
+  resendLink.addEventListener('click', async () => {
+    if (!currentPhone) return;
+    clearMsg();
+    showMsg('Resending OTP...', 'success');
+    await sendOtp(currentPhone);
+    stepPhone.classList.add('hidden'); // ensure we stay on OTP screen
+    stepOtp.classList.remove('hidden');
+  });
+</script>
+
+</body>
+</html>
