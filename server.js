@@ -59,7 +59,9 @@ if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
   console.error('WARNING: SMTP_USER or SMTP_PASS is not set. Emails will not be sent.');
 } else {
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT) || 465,
+    secure: process.env.SMTP_SECURE !== 'false', // true for 465, false for 587
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS
@@ -68,7 +70,7 @@ if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
 
   transporter.verify((err) => {
     if (err) {
-      console.error('SMTP verification failed:', err.message);
+      console.error('SMTP verification failed:', err.message, '| code:', err.code, '| response:', err.response);
       mailReady = false;
     } else {
       console.log('SMTP transporter ready');
