@@ -116,18 +116,6 @@
             display: block;
         }
 
-        .success-message {
-            color: #27ae60;
-            font-size: 13px;
-            margin-top: 6px;
-            display: none;
-            text-align: center;
-        }
-
-        .success-message.show {
-            display: block;
-        }
-
         .alert {
             padding: 12px 16px;
             border-radius: 8px;
@@ -352,7 +340,6 @@
                 stopTimer();
             }
 
-            // Focus on input of current step
             if (stepNumber === 1) {
                 document.getElementById('phone').focus();
             } else if (stepNumber === 2) {
@@ -364,7 +351,7 @@
 
         function startTimer() {
             stopTimer();
-            let timeLeft = 300; // 5 minutes
+            let timeLeft = 300;
             const timerElement = document.getElementById('timer');
             
             timerInterval = setInterval(() => {
@@ -521,7 +508,6 @@
             goToStep(1);
         }
 
-        // Allow Enter key to submit forms
         document.getElementById('phone').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') checkPhone();
         });
@@ -534,7 +520,6 @@
             if (e.key === 'Enter') verifyOtp();
         });
 
-        // Auto-focus phone input on load
         document.getElementById('phone').focus();
     </script>
 </body>
