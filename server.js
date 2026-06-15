@@ -11,9 +11,27 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- MongoDB ----------
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
+let dbReady = false;
+
+if (!process.env.MONGO_URI) {
+  console.error('FATAL: MONGO_URI is not set in environment variables.');
+} else {
+  mongoose.connect(process.env.MONGO_URI)
+    .then(() => {
+      dbReady = true;
+      console.log('MongoDB connected');
+    })
+    .catch(err => {
+      console.error('MongoDB connection error:', err.message);
+    });
+}
+
+mongoose.connection.on('connected', () => { dbReady = true; });
+mongoose.connection.on('disconnected', () => { dbReady = false; });
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB runtime error:', err.message);
+  dbReady = false;
+});
 
 const userSchema = new mongoose.Schema({
   phone: { type: String, required: true, unique: true, index: true },
@@ -34,13 +52,30 @@ const User = mongoose.model('User', userSchema);
 const Otp = mongoose.model('Otp', otpSchema);
 
 // ---------- Mail transporter ----------
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-});
+let mailReady = false;
+let transporter = null;
+
+if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+  console.error('WARNING: SMTP_USER or SMTP_PASS is not set. Emails will not be sent.');
+} else {
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+
+  transporter.verify((err) => {
+    if (err) {
+      console.error('SMTP verification failed:', err.message);
+      mailReady = false;
+    } else {
+      console.log('SMTP transporter ready');
+      mailReady = true;
+    }
+  });
+}
 
 // ---------- Helpers ----------
 const hashOtp = (otp) => crypto.createHash('sha256').update(otp).digest('hex');
@@ -50,6 +85,14 @@ const isValidIndianPhone = (phone) => /^[6-9]\d{9}$/.test(phone);
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+
+// Middleware: block API requests if DB isn't ready
+function requireDb(req, res, next) {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ error: 'Database not connected. Please try again shortly.' });
+  }
+  next();
+}
 
 // ---------- Rate limiters ----------
 const otpRequestLimiter = rateLimit({
@@ -64,14 +107,23 @@ const otpVerifyLimiter = rateLimit({
   message: { error: 'Too many verification attempts. Please try again later.' }
 });
 
+// ---------- Health check ----------
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    mail: mailReady ? 'ready' : 'not_ready'
+  });
+});
+
 // ---------- Routes ----------
 
 // Step 1: Check phone -> tell frontend whether email is needed
-app.post('/api/check-phone', async (req, res) => {
+app.post('/api/check-phone', requireDb, async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone } = req.body || {};
 
-    if (!isValidIndianPhone(phone)) {
+    if (!phone || !isValidIndianPhone(phone)) {
       return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
     }
 
@@ -83,18 +135,22 @@ app.post('/api/check-phone', async (req, res) => {
       return res.json({ emailRequired: true, message: 'New phone number. Please provide your email.' });
     }
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error.' });
+    console.error('check-phone error:', err);
+    res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
 
 // Step 2: Send OTP to email (existing or newly provided)
-app.post('/api/send-otp', otpRequestLimiter, async (req, res) => {
+app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
   try {
-    const { phone, email } = req.body;
+    const { phone, email } = req.body || {};
 
-    if (!isValidIndianPhone(phone)) {
+    if (!phone || !isValidIndianPhone(phone)) {
       return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
+    }
+
+    if (!transporter) {
+      return res.status(503).json({ error: 'Email service is not configured on the server.' });
     }
 
     let user = await User.findOne({ phone });
@@ -132,17 +188,17 @@ app.post('/api/send-otp', otpRequestLimiter, async (req, res) => {
 
     res.json({ success: true, message: `OTP sent to ${maskedEmail}` });
   } catch (err) {
-    console.error(err);
+    console.error('send-otp error:', err);
     res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
   }
 });
 
 // Step 3: Verify OTP and create user if new
-app.post('/api/verify-otp', otpVerifyLimiter, async (req, res) => {
+app.post('/api/verify-otp', otpVerifyLimiter, requireDb, async (req, res) => {
   try {
-    const { phone, otp } = req.body;
+    const { phone, otp } = req.body || {};
 
-    if (!isValidIndianPhone(phone) || !otp) {
+    if (!phone || !isValidIndianPhone(phone) || !otp) {
       return res.status(400).json({ error: 'Invalid request.' });
     }
 
@@ -182,9 +238,15 @@ app.post('/api/verify-otp', otpVerifyLimiter, async (req, res) => {
       user: { phone: user.phone, email: user.email }
     });
   } catch (err) {
-    console.error(err);
+    console.error('verify-otp error:', err);
     res.status(500).json({ error: 'Server error.' });
   }
+});
+
+// Catch-all error handler for unexpected issues
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Unexpected server error.' });
 });
 
 const PORT = process.env.PORT || 3000;
