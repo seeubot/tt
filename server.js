@@ -6,20 +6,12 @@ const path = require('path');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
-
-// Enable trust proxy to properly handle X-Forwarded-For header
 app.set('trust proxy', 1);
-
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- MongoDB ----------
-if (!process.env.MONGO_URI) {
-  console.error('FATAL: MONGO_URI is not set in environment variables.');
-  process.exit(1);
-}
-
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect('mongodb+srv://movie:movie@movie.tylkv.mongodb.net/otp-app?appName=movie')
   .then(() => console.log('MongoDB connected'))
   .catch(err => {
     console.error('MongoDB connection error:', err.message);
@@ -44,19 +36,12 @@ const otpSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Otp = mongoose.model('Otp', otpSchema);
 
-// ---------- Mail (Brevo HTTP API) ----------
-const BREVO_API_KEY = process.env.BREVO_API_KEY;
-const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL;
-const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'OTP Login';
+// ---------- Brevo Email Configuration ----------
+const BREVO_API_KEY = 'xsmtpsib-e2c10a0415fb71988ca4546b5281d9b95799574c53bfda38e73188016e9f489a-fevW0ZZxJ3aGFYmy';
+const BREVO_FROM_EMAIL = 'siddhikreddy440@gmail.com';
+const BREVO_FROM_NAME = 'OTP Login App';
 
-let mailReady = false;
-if (!BREVO_API_KEY || !BREVO_FROM_EMAIL) {
-  console.error('WARNING: BREVO_API_KEY or BREVO_FROM_EMAIL is not set. Emails will not be sent.');
-} else {
-  mailReady = true;
-  console.log('Brevo email API configured');
-}
-
+// Send OTP email via Brevo
 async function sendOtpEmail(toEmail, otp) {
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
@@ -66,10 +51,46 @@ async function sendOtpEmail(toEmail, otp) {
       'Accept': 'application/json'
     },
     body: JSON.stringify({
-      sender: { name: BREVO_FROM_NAME, email: BREVO_FROM_EMAIL },
-      to: [{ email: toEmail }],
+      sender: { 
+        name: BREVO_FROM_NAME, 
+        email: BREVO_FROM_EMAIL 
+      },
+      to: [{ 
+        email: toEmail 
+      }],
       subject: 'Your OTP Code',
-      htmlContent: `<p>Your OTP code is <b>${otp}</b>. It is valid for 5 minutes.</p>`
+      htmlContent: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0; }
+            .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+            .otp-code { font-size: 32px; font-weight: bold; color: #667eea; text-align: center; letter-spacing: 5px; padding: 20px; background: white; border-radius: 8px; margin: 20px 0; }
+            .footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>🔐 Your OTP Code</h1>
+            </div>
+            <div class="content">
+              <p>Hello,</p>
+              <p>Your One-Time Password (OTP) is:</p>
+              <div class="otp-code">${otp}</div>
+              <p>This OTP is valid for <strong>5 minutes</strong>.</p>
+              <p>If you didn't request this code, please ignore this email.</p>
+              <div class="footer">
+                <p>This is an automated message, please do not reply.</p>
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
     })
   });
 
@@ -87,7 +108,6 @@ const isValidIndianPhone = (phone) => /^[6-9]\d{9}$/.test(phone);
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-// Middleware: block API requests if DB isn't ready
 function requireDb(req, res, next) {
   if (mongoose.connection.readyState !== 1) {
     return res.status(503).json({ error: 'Database not connected. Please try again shortly.' });
@@ -117,7 +137,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    mail: mailReady ? 'ready' : 'not_ready'
+    mail: 'configured'
   });
 });
 
@@ -151,10 +171,6 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
       return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
     }
 
-    if (!mailReady) {
-      return res.status(503).json({ error: 'Email service is not configured on the server.' });
-    }
-
     let user = await User.findOne({ phone });
     let targetEmail;
 
@@ -173,13 +189,15 @@ app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
 
     await Otp.deleteMany({ phone });
     await Otp.create({ phone, email: targetEmail, otpHash, expiresAt });
+    
+    // Send email via Brevo
     await sendOtpEmail(targetEmail, otp);
 
     const maskedEmail = targetEmail.replace(/^(.{2}).+(@.+)$/, '$1***$2');
     res.json({ success: true, message: `OTP sent to ${maskedEmail}` });
   } catch (err) {
     console.error('send-otp error:', err);
-    res.status(500).json({ error: 'Failed to send OTP: ' + err.message });
+    res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
   }
 });
 
@@ -231,7 +249,6 @@ app.post('/api/verify-otp', otpVerifyLimiter, requireDb, async (req, res) => {
   }
 });
 
-// Catch-all error handler
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Unexpected server error.' });
