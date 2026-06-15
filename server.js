@@ -53,6 +53,7 @@ const Otp = mongoose.model('Otp', otpSchema);
 
 // ---------- Mail transporter ----------
 let mailReady = false;
+let lastMailError = null;
 let transporter = null;
 
 if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
@@ -72,9 +73,11 @@ if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     if (err) {
       console.error('SMTP verification failed:', err.message, '| code:', err.code, '| response:', err.response);
       mailReady = false;
+      lastMailError = `${err.code || ''} ${err.message}`.trim();
     } else {
       console.log('SMTP transporter ready');
       mailReady = true;
+      lastMailError = null;
     }
   });
 }
@@ -114,7 +117,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    mail: mailReady ? 'ready' : 'not_ready'
+    mail: mailReady ? 'ready' : 'not_ready',
+    mailError: lastMailError
   });
 });
 
