@@ -71,38 +71,131 @@ async function sendOtpEmail(toEmail, otp) {
       to: [{ 
         email: toEmail 
       }],
-      subject: 'Your OTP Code',
+      subject: 'OTP for MORO',
       htmlContent: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0; }
-            .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
-            .otp-code { font-size: 32px; font-weight: bold; color: #667eea; text-align: center; letter-spacing: 5px; padding: 20px; background: white; border-radius: 8px; margin: 20px 0; }
-            .footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>🔐 Your OTP Code</h1>
-            </div>
-            <div class="content">
-              <p>Hello,</p>
-              <p>Your One-Time Password (OTP) is:</p>
-              <div class="otp-code">${otp}</div>
-              <p>This OTP is valid for <strong>5 minutes</strong>.</p>
-              <p>If you didn't request this code, please ignore this email.</p>
-              <div class="footer">
-                <p>This is an automated message, please do not reply.</p>
-              </div>
-            </div>
-          </div>
-        </body>
-        </html>
+      <!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { 
+      font-family: 'Helvetica Neue', Arial, sans-serif; 
+      line-height: 1.6; 
+      color: #2D3142; 
+      background-color: #F7F9FB;
+      margin: 0;
+      padding: 0;
+    }
+    .container { 
+      max-width: 500px; 
+      margin: 40px auto; 
+      background: #FFFFFF;
+      border-radius: 16px; 
+      overflow: hidden;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    }
+    .header { 
+      background: #1A1C23; 
+      padding: 30px 20px; 
+      text-align: center; 
+    }
+    .logo {
+      font-size: 28px;
+      font-weight: 900;
+      color: #FF6B35;
+      letter-spacing: 2px;
+      margin: 0;
+    }
+    .logo span {
+      color: #FFFFFF;
+    }
+    .content { 
+      padding: 40px 30px; 
+      text-align: center;
+    }
+    h2 {
+      font-size: 22px;
+      color: #1A1C23;
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+    p {
+      color: #6C757D;
+      font-size: 15px;
+      margin: 0 0 20px 0;
+    }
+    .otp-container {
+      background: #FFF8F5;
+      border: 2px dashed #FF6B35;
+      border-radius: 12px;
+      padding: 20px;
+      margin: 30px 0;
+    }
+    .otp-code { 
+      font-size: 36px; 
+      font-weight: 800; 
+      color: #FF6B35; 
+      letter-spacing: 6px; 
+      line-height: 1;
+    }
+    .expiry-text {
+      font-size: 13px;
+      color: #FF6B35;
+      font-weight: 600;
+      margin-top: 8px;
+      display: block;
+    }
+    .security-note {
+      font-size: 13px;
+      color: #ADB5BD;
+      border-top: 1px solid #EEF1F6;
+      padding-top: 20px;
+      margin-top: 30px;
+    }
+    .footer { 
+      text-align: center; 
+      color: #ADB5BD; 
+      font-size: 12px; 
+      padding: 0 20px 30px 20px;
+    }
+    .footer a {
+      color: #FF6B35;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header with MORO Branding -->
+    <div class="header">
+      <h1 class="logo">MO<span>RO</span></h1>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="content">
+      <h2>Hungry? Let's get you verified!</h2>
+      <p>Use the verification code below to complete your request on the MORO app.</p>
+      
+      <!-- OTP Box -->
+      <div class="otp-container">
+        <div class="otp-code">${otp}</div>
+        <span class="expiry-text">⏱ Valid for 5 minutes only</span>
+      </div>
+      
+      <p class="security-note">
+        If you didn't request this code, you can safely ignore this email. Someone might have typed your info by mistake.
+      </p>
+    </div>
+    
+    <!-- Footer -->
+    <div class="footer">
+      <p>Sent with 🧡 from MORO HQ</p>
+      <p>This is an automated message, please do not reply.</p>
+    </div>
+  </div>
+</body>
+</html>
       `
     })
   });
