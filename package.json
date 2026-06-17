@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "install": "npm install --production"
+   "build": "npm install --omit=dev"
   },
   "dependencies": {
     "compression": "^1.7.4",
