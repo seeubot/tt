@@ -1,368 +1,549 @@
+// server.js - Single File Backend Server
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const path = require('path');
+const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const cors = require('cors');
+const compression = require('compression');
 
 const app = express();
-app.set('trust proxy', 1);
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- MongoDB ----------
-if (!process.env.MONGO_URI) {
-  console.error('FATAL: MONGO_URI is not set in environment variables.');
+// ============ Security Middleware ============
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
+
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+app.use(compression());
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+
+// ============ Rate Limiting ============
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const chatCreationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many chat creations, please try again later.' }
+});
+
+app.use('/api/', globalLimiter);
+app.use('/api/chat/create', chatCreationLimiter);
+
+// ============ Database Connection ============
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/secretchat';
+
+mongoose.connect(MONGODB_URI, {
+  maxPoolSize: 10,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+})
+.then(() => console.log('MongoDB connected'))
+.catch((err) => {
+  console.error('MongoDB connection error:', err);
   process.exit(1);
-}
+});
 
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => {
-    console.error('MongoDB connection error:', err.message);
-    process.exit(1);
-  });
-
-const userSchema = new mongoose.Schema({
-  phone: { type: String, required: true, unique: true, index: true },
-  email: { type: String, required: true },
+// ============ MongoDB Models ============
+const chatSchema = new mongoose.Schema({
+  chatId: { type: String, required: true, unique: true, index: true },
+  shareCode: { type: String, required: true, unique: true, index: true },
+  participants: [{
+    userId: { type: String, required: true },
+    deviceId: { type: String, required: true },
+    publicKey: { type: String },
+    joinedAt: { type: Date, default: Date.now },
+    lastSeen: { type: Date, default: Date.now },
+    isOnline: { type: Boolean, default: false },
+    isTyping: { type: Boolean, default: false }
+  }],
+  encryptionKey: { type: String },
+  messageCount: { type: Number, default: 0 },
+  status: { type: String, enum: ['active', 'deleted'], default: 'active' },
+  lastActivity: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
-const otpSchema = new mongoose.Schema({
-  phone: { type: String, required: true, index: true },
-  email: { type: String, required: true },
-  otpHash: { type: String, required: true },
-  expiresAt: { type: Date, required: true },
-  attempts: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now, expires: 600 }
+const messageSchema = new mongoose.Schema({
+  chatId: { type: String, required: true, index: true },
+  senderId: { type: String, required: true },
+  messageType: { type: String, enum: ['text', 'audio', 'system'], default: 'text' },
+  content: { type: String, required: true },
+  iv: { type: String },
+  selfDestructAt: { type: Date, required: true },
+  createdAt: { type: Date, default: Date.now }
 });
 
-const User = mongoose.model('User', userSchema);
-const Otp = mongoose.model('Otp', otpSchema);
+// TTL index for auto-deletion
+messageSchema.index({ selfDestructAt: 1 }, { expireAfterSeconds: 0 });
+chatSchema.index({ lastActivity: 1 }, { expireAfterSeconds: 24 * 60 * 60 });
 
-// ---------- Brevo Email Configuration ----------
-const BREVO_API_KEY = process.env.BREVO_API_KEY;
-const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL;
-const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || 'OTP Login App';
+const Chat = mongoose.model('Chat', chatSchema);
+const Message = mongoose.model('Message', messageSchema);
 
-let mailReady = false;
-if (!BREVO_API_KEY || !BREVO_FROM_EMAIL) {
-  console.error('WARNING: BREVO_API_KEY or BREVO_FROM_EMAIL is not set. Emails will not be sent.');
-} else {
-  mailReady = true;
-  console.log('Brevo email API configured');
-}
+// ============ Helper Functions ============
+const generateId = (length = 16) => crypto.randomBytes(length).toString('hex');
+const generateShareCode = () => crypto.randomBytes(3).toString('hex').toUpperCase().substring(0, 6);
+const generateUserId = () => 'U' + crypto.randomBytes(6).toString('hex');
+const generateEncryptionKey = () => crypto.randomBytes(32).toString('base64');
 
-// Send OTP email via Brevo
-async function sendOtpEmail(toEmail, otp) {
-  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-    method: 'POST',
-    headers: {
-      'api-key': BREVO_API_KEY,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    },
-    body: JSON.stringify({
-      sender: { 
-        name: BREVO_FROM_NAME, 
-        email: BREVO_FROM_EMAIL 
-      },
-      to: [{ 
-        email: toEmail 
-      }],
-      subject: 'OTP for MORO',
-      htmlContent: `
-      <!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { 
-      font-family: 'Helvetica Neue', Arial, sans-serif; 
-      line-height: 1.6; 
-      color: #2D3142; 
-      background-color: #F7F9FB;
-      margin: 0;
-      padding: 0;
+// ============ WebSocket Setup ============
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ 
+  server,
+  maxPayload: 1024 * 1024,
+});
+
+const activeConnections = new Map();
+const userSessions = new Map();
+
+wss.on('connection', async (ws, req) => {
+  ws.isAlive = true;
+  ws.id = generateId();
+  
+  let userId = null;
+  let chatId = null;
+
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    chatId = url.searchParams.get('chatId');
+    userId = url.searchParams.get('userId');
+
+    if (!chatId || !userId) {
+      ws.close(4000, 'Missing parameters');
+      return;
     }
-    .container { 
-      max-width: 500px; 
-      margin: 40px auto; 
-      background: #FFFFFF;
-      border-radius: 16px; 
-      overflow: hidden;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+
+    const chat = await Chat.findOne({ 
+      chatId, 
+      status: 'active',
+      'participants.userId': userId 
+    });
+
+    if (!chat) {
+      ws.close(4003, 'Chat not found');
+      return;
     }
-    .header { 
-      background: #1A1C23; 
-      padding: 30px 20px; 
-      text-align: center; 
+
+    ws.userId = userId;
+    ws.chatId = chatId;
+
+    if (!activeConnections.has(chatId)) {
+      activeConnections.set(chatId, new Set());
     }
-    .logo {
-      font-size: 28px;
-      font-weight: 900;
-      color: #FF6B35;
-      letter-spacing: 2px;
-      margin: 0;
-    }
-    .logo span {
-      color: #FFFFFF;
-    }
-    .content { 
-      padding: 40px 30px; 
-      text-align: center;
-    }
-    h2 {
-      font-size: 22px;
-      color: #1A1C23;
-      margin-top: 0;
-      margin-bottom: 10px;
-    }
-    p {
-      color: #6C757D;
-      font-size: 15px;
-      margin: 0 0 20px 0;
-    }
-    .otp-container {
-      background: #FFF8F5;
-      border: 2px dashed #FF6B35;
-      border-radius: 12px;
-      padding: 20px;
-      margin: 30px 0;
-    }
-    .otp-code { 
-      font-size: 36px; 
-      font-weight: 800; 
-      color: #FF6B35; 
-      letter-spacing: 6px; 
-      line-height: 1;
-    }
-    .expiry-text {
-      font-size: 13px;
-      color: #FF6B35;
-      font-weight: 600;
-      margin-top: 8px;
-      display: block;
-    }
-    .security-note {
-      font-size: 13px;
-      color: #ADB5BD;
-      border-top: 1px solid #EEF1F6;
-      padding-top: 20px;
-      margin-top: 30px;
-    }
-    .footer { 
-      text-align: center; 
-      color: #ADB5BD; 
-      font-size: 12px; 
-      padding: 0 20px 30px 20px;
-    }
-    .footer a {
-      color: #FF6B35;
-      text-decoration: none;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <!-- Header with MORO Branding -->
-    <div class="header">
-      <h1 class="logo">MO<span>RO</span></h1>
-    </div>
-    
-    <!-- Main Content -->
-    <div class="content">
-      <h2>Hungry? Let's get you verified!</h2>
-      <p>Use the verification code below to complete your request on the MORO app.</p>
+    activeConnections.get(chatId).add(ws);
+    userSessions.set(userId, ws);
+
+    await Chat.updateOne(
+      { chatId, 'participants.userId': userId },
+      { 
+        $set: { 
+          'participants.$.isOnline': true,
+          'participants.$.lastSeen': new Date(),
+          lastActivity: new Date()
+        } 
+      }
+    );
+
+    broadcastToChat(chatId, {
+      type: 'user_status',
+      userId,
+      status: 'online',
+      timestamp: new Date().toISOString()
+    }, ws);
+
+    ws.send(JSON.stringify({
+      type: 'connection_established',
+      chatId,
+      userId,
+      timestamp: new Date().toISOString()
+    }));
+
+    console.log(`User ${userId} connected to chat ${chatId}`);
+
+  } catch (error) {
+    console.error('Connection error:', error);
+    ws.close(4002, 'Connection failed');
+    return;
+  }
+
+  ws.on('message', async (data) => {
+    try {
+      const message = JSON.parse(data.toString());
       
-      <!-- OTP Box -->
-      <div class="otp-container">
-        <div class="otp-code">${otp}</div>
-        <span class="expiry-text">⏱ Valid for 5 minutes only</span>
-      </div>
-      
-      <p class="security-note">
-        If you didn't request this code, you can safely ignore this email. Someone might have typed your info by mistake.
-      </p>
-    </div>
-    
-    <!-- Footer -->
-    <div class="footer">
-      <p>Sent with 🧡 from MORO HQ</p>
-      <p>This is an automated message, please do not reply.</p>
-    </div>
-  </div>
-</body>
-</html>
-      `
-    })
+      switch (message.type) {
+        case 'message':
+          await handleChatMessage(chatId, userId, message, ws);
+          break;
+          
+        case 'typing':
+          broadcastToChat(chatId, {
+            type: 'typing_status',
+            userId,
+            isTyping: message.isTyping,
+            timestamp: new Date().toISOString()
+          }, ws);
+          break;
+          
+        case 'ping':
+          ws.send(JSON.stringify({ type: 'pong' }));
+          break;
+          
+        default:
+          console.warn(`Unknown message type: ${message.type}`);
+      }
+    } catch (error) {
+      console.error('Message error:', error);
+      ws.send(JSON.stringify({ type: 'error', error: 'Message processing failed' }));
+    }
   });
 
-  if (!response.ok) {
-    const errBody = await response.text();
-    throw new Error(`Brevo API error (${response.status}): ${errBody}`);
-  }
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
 
-  return response.json();
-}
+  ws.on('close', async () => {
+    console.log(`User ${userId} disconnected`);
+    
+    const connections = activeConnections.get(chatId);
+    if (connections) {
+      connections.delete(ws);
+      if (connections.size === 0) {
+        activeConnections.delete(chatId);
+      }
+    }
+    userSessions.delete(userId);
 
-// ---------- Helpers ----------
-const hashOtp = (otp) => crypto.createHash('sha256').update(otp).digest('hex');
-const isValidIndianPhone = (phone) => /^[6-9]\d{9}$/.test(phone);
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+    try {
+      await Chat.updateOne(
+        { chatId, 'participants.userId': userId },
+        { 
+          $set: { 
+            'participants.$.isOnline': false,
+            'participants.$.lastSeen': new Date(),
+            lastActivity: new Date()
+          } 
+        }
+      );
 
-function requireDb(req, res, next) {
-  if (mongoose.connection.readyState !== 1) {
-    return res.status(503).json({ error: 'Database not connected. Please try again shortly.' });
-  }
-  next();
-}
-
-// ---------- Rate limiters ----------
-const otpRequestLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 5,
-  message: { error: 'Too many OTP requests. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
+      broadcastToChat(chatId, {
+        type: 'user_status',
+        userId,
+        status: 'offline',
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Disconnect error:', error);
+    }
+  });
 });
 
-const otpVerifyLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 10,
-  message: { error: 'Too many verification attempts. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// Heartbeat
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
 
-// ---------- Health check ----------
+wss.on('close', () => clearInterval(interval));
+
+async function handleChatMessage(chatId, userId, message, senderWs) {
+  const { content, iv, messageType = 'text' } = message;
+  
+  if (!content) return;
+
+  const selfDestructAt = new Date(Date.now() + 2 * 60 * 1000); // 2 minutes
+
+  const newMessage = await Message.create({
+    chatId,
+    senderId: userId,
+    messageType,
+    content,
+    iv,
+    selfDestructAt
+  });
+
+  await Chat.updateOne(
+    { chatId },
+    { 
+      $inc: { messageCount: 1 },
+      $set: { lastActivity: new Date() }
+    }
+  );
+
+  senderWs.send(JSON.stringify({
+    type: 'message_sent',
+    messageId: newMessage._id,
+    timestamp: newMessage.createdAt
+  }));
+
+  broadcastToChat(chatId, {
+    type: 'new_message',
+    messageId: newMessage._id,
+    content,
+    iv,
+    messageType,
+    senderId: userId,
+    selfDestructAt: selfDestructAt.toISOString(),
+    timestamp: newMessage.createdAt.toISOString()
+  }, senderWs);
+}
+
+function broadcastToChat(chatId, data, excludeWs = null) {
+  const connections = activeConnections.get(chatId);
+  if (!connections) return;
+
+  const messageStr = JSON.stringify(data);
+  connections.forEach((client) => {
+    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+      client.send(messageStr);
+    }
+  });
+}
+
+// ============ API Routes ============
+
+// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    mail: mailReady ? 'ready' : 'not_ready'
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    activeConnections: wss.clients.size
   });
 });
 
-// ---------- Routes ----------
-app.post('/api/check-phone', requireDb, async (req, res) => {
+// Create new chat
+app.post('/api/chat/create', async (req, res) => {
   try {
-    const { phone } = req.body || {};
+    const { deviceId, publicKey } = req.body;
 
-    if (!phone || !isValidIndianPhone(phone)) {
-      return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Device ID is required' });
     }
 
-    const user = await User.findOne({ phone });
+    // Check active chats limit
+    const activeChats = await Chat.countDocuments({
+      'participants.deviceId': deviceId,
+      status: 'active'
+    });
 
-    if (user) {
-      return res.json({ emailRequired: false, message: 'Phone number recognized.' });
-    } else {
-      return res.json({ emailRequired: true, message: 'New phone number. Please provide your email.' });
+    if (activeChats >= 5) {
+      return res.status(429).json({ error: 'Maximum active chats reached. Delete some old chats.' });
     }
-  } catch (err) {
-    console.error('check-phone error:', err);
-    res.status(500).json({ error: 'Server error. Please try again.' });
+
+    const chatId = generateId(12);
+    const shareCode = generateShareCode();
+    const userId = generateUserId();
+    const encryptionKey = generateEncryptionKey();
+
+    await Chat.create({
+      chatId,
+      shareCode,
+      participants: [{
+        userId,
+        deviceId,
+        publicKey: publicKey || '',
+        isOnline: true,
+        joinedAt: new Date()
+      }],
+      encryptionKey,
+      status: 'active',
+      lastActivity: new Date()
+    });
+
+    res.status(201).json({
+      success: true,
+      chatId,
+      shareCode,
+      userId,
+      encryptionKey,
+      message: 'Chat created successfully. Share the code with your partner.'
+    });
+
+  } catch (error) {
+    console.error('Chat creation error:', error);
+    res.status(500).json({ error: 'Failed to create chat' });
   }
 });
 
-app.post('/api/send-otp', otpRequestLimiter, requireDb, async (req, res) => {
+// Join existing chat
+app.post('/api/chat/join', async (req, res) => {
   try {
-    const { phone, email } = req.body || {};
+    const { shareCode, deviceId, publicKey } = req.body;
 
-    if (!phone || !isValidIndianPhone(phone)) {
-      return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number.' });
+    if (!shareCode || !deviceId) {
+      return res.status(400).json({ error: 'Share code and device ID are required' });
     }
 
-    if (!mailReady) {
-      return res.status(503).json({ error: 'Email service is not configured on the server.' });
+    const chat = await Chat.findOne({ 
+      shareCode: shareCode.toUpperCase(),
+      status: 'active'
+    });
+
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found or expired. Please check the code.' });
     }
 
-    let user = await User.findOne({ phone });
-    let targetEmail;
-
-    if (user) {
-      targetEmail = user.email;
-    } else {
-      if (!email || !isValidEmail(email)) {
-        return res.status(400).json({ error: 'A valid email is required for a new phone number.' });
-      }
-      targetEmail = email.toLowerCase().trim();
+    if (chat.participants.length >= 2) {
+      return res.status(400).json({ error: 'Chat is already full' });
     }
 
-    const otp = generateOtp();
-    const otpHash = hashOtp(otp);
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-
-    await Otp.deleteMany({ phone });
-    await Otp.create({ phone, email: targetEmail, otpHash, expiresAt });
-    
-    // Send email via Brevo
-    await sendOtpEmail(targetEmail, otp);
-
-    const maskedEmail = targetEmail.replace(/^(.{2}).+(@.+)$/, '$1***$2');
-    res.json({ success: true, message: `OTP sent to ${maskedEmail}` });
-  } catch (err) {
-    console.error('send-otp error:', err);
-    res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
-  }
-});
-
-app.post('/api/verify-otp', otpVerifyLimiter, requireDb, async (req, res) => {
-  try {
-    const { phone, otp } = req.body || {};
-
-    if (!phone || !isValidIndianPhone(phone) || !otp) {
-      return res.status(400).json({ error: 'Invalid request.' });
+    // Check if device already in chat
+    if (chat.participants.find(p => p.deviceId === deviceId)) {
+      return res.status(400).json({ error: 'This device is already in the chat' });
     }
 
-    const record = await Otp.findOne({ phone });
+    const userId = generateUserId();
 
-    if (!record) {
-      return res.status(400).json({ error: 'OTP expired or not found. Please request a new one.' });
-    }
-
-    if (record.expiresAt < new Date()) {
-      await Otp.deleteOne({ _id: record._id });
-      return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
-    }
-
-    if (record.attempts >= 5) {
-      await Otp.deleteOne({ _id: record._id });
-      return res.status(400).json({ error: 'Too many incorrect attempts. Please request a new OTP.' });
-    }
-
-    if (hashOtp(otp) !== record.otpHash) {
-      record.attempts += 1;
-      await record.save();
-      return res.status(400).json({ error: 'Incorrect OTP.' });
-    }
-
-    let user = await User.findOne({ phone });
-    if (!user) {
-      user = await User.create({ phone, email: record.email });
-    }
-
-    await Otp.deleteOne({ _id: record._id });
+    chat.participants.push({
+      userId,
+      deviceId,
+      publicKey: publicKey || '',
+      isOnline: true,
+      joinedAt: new Date()
+    });
+    chat.lastActivity = new Date();
+    await chat.save();
 
     res.json({
       success: true,
-      message: 'Login successful.',
-      user: { phone: user.phone, email: user.email }
+      chatId: chat.chatId,
+      userId,
+      encryptionKey: chat.encryptionKey,
+      message: 'Successfully joined the chat'
     });
-  } catch (err) {
-    console.error('verify-otp error:', err);
-    res.status(500).json({ error: 'Server error.' });
+
+  } catch (error) {
+    console.error('Chat join error:', error);
+    res.status(500).json({ error: 'Failed to join chat' });
   }
 });
 
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Unexpected server error.' });
+// Verify chat exists
+app.get('/api/chat/verify/:shareCode', async (req, res) => {
+  try {
+    const chat = await Chat.findOne({ 
+      shareCode: req.params.shareCode.toUpperCase(),
+      status: 'active',
+      $expr: { $lt: [{ $size: '$participants' }, 2] }
+    });
+
+    res.json({ 
+      exists: !!chat,
+      participantsCount: chat ? chat.participants.length : 0
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Verification failed' });
+  }
 });
 
+// Get chat info
+app.get('/api/chat/:chatId', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    const chat = await Chat.findOne({ 
+      chatId: req.params.chatId,
+      'participants.userId': userId,
+      status: 'active'
+    });
+
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    const otherParticipant = chat.participants.find(p => p.userId !== userId);
+
+    res.json({
+      chatId: chat.chatId,
+      shareCode: chat.shareCode,
+      participantsCount: chat.participants.length,
+      createdAt: chat.createdAt,
+      lastActivity: chat.lastActivity,
+      otherParticipant: otherParticipant ? {
+        userId: otherParticipant.userId,
+        isOnline: otherParticipant.isOnline,
+        lastSeen: otherParticipant.lastSeen
+      } : null
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get chat info' });
+  }
+});
+
+// Delete chat
+app.delete('/api/chat/:chatId', async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    const chat = await Chat.findOne({ 
+      chatId: req.params.chatId,
+      'participants.userId': userId
+    });
+
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    chat.status = 'deleted';
+    await chat.save();
+
+    // Delete all messages
+    await Message.deleteMany({ chatId: req.params.chatId });
+
+    res.json({ success: true, message: 'Chat deleted successfully' });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete chat' });
+  }
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ============ Start Server ============
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`API URL: http://localhost:${PORT}`);
+  console.log(`WebSocket URL: ws://localhost:${PORT}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('Shutting down...');
+  wss.clients.forEach((client) => client.close());
+  server.close();
+  await mongoose.connection.close();
+  process.exit(0);
+});
